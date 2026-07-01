@@ -866,6 +866,12 @@ class HiCacheController:
             request_id, host_indices, new_input_tokens, last_hash, prefix_keys
         )
         self.prefetch_queue.put(operation)
+        logger.debug(
+            "prefetch_queue: submit req=%s ntokens=%d qdepth=%d",
+            request_id,
+            len(new_input_tokens),
+            self.prefetch_queue.qsize(),
+        )
         return operation
 
     def terminate_prefetch(self, operation):
@@ -1021,6 +1027,12 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                logger.debug(
+                    "prefetch_queue: drain req=%s ntokens=%d qdepth=%d",
+                    operation.request_id,
+                    len(operation.token_ids),
+                    self.prefetch_queue.qsize(),
+                )
                 hash_value, storage_hit_count = self._storage_hit_query(operation)
                 storage_hit_count_tensor = torch.tensor(
                     storage_hit_count, dtype=torch.int
@@ -1068,6 +1080,12 @@ class HiCacheController:
             host_indices, token_ids, hash_value=hash_value, prefix_keys=prefix_keys
         )
         self.backup_queue.put(operation)
+        logger.debug(
+            "backup_queue: submit op=%s ntokens=%d qdepth=%d",
+            operation.id,
+            len(token_ids),
+            self.backup_queue.qsize(),
+        )
         return operation.id
 
     # todo: deprecate
@@ -1158,6 +1176,12 @@ class HiCacheController:
                 operation = self.backup_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                logger.debug(
+                    "backup_queue: drain op=%s ntokens=%d qdepth=%d",
+                    operation.id,
+                    len(operation.token_ids),
+                    self.backup_queue.qsize(),
+                )
 
                 if not self.backup_skip:
                     self._page_backup(operation)

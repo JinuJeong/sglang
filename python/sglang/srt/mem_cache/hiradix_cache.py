@@ -1115,7 +1115,13 @@ class HiRadixCache(RadixCache):
         cfg = self.prefetch_timeout_config
         num_tokens = len(operation.hash_value) * self.page_size
         timeout = min(cfg.max, cfg.base + cfg.per_ki_token * num_tokens / 1024)
-        return time.monotonic() - operation.start_time > timeout
+        if time.monotonic() - operation.start_time > timeout:
+            logger.debug(
+                f"Prefetch {operation.request_id} timed out: "
+                f"num_tokens={num_tokens}, completed_tokens={operation.completed_tokens}"
+            )
+            return True
+        return False
 
     def can_terminate_prefetch(self, operation: PrefetchOperation):
         can_terminate = True
