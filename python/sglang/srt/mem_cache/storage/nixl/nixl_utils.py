@@ -284,6 +284,37 @@ class NixlFileManager:
             logger.error(f"Failed to close file descriptor {fd}: {e}")
             return False
 
+    def get_temp_file_path(self, file_path: str) -> str:
+        return file_path + ".tmp"
+
+    def create_temp_file(self, file_path: str) -> bool:
+        """Create a temp file if it doesn't exist."""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as f:
+                pass  # Create empty file
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create temp file {file_path}: {e}")
+            return False
+
+    def finalize_temp_file(self, temp_path: str, final_path: str) -> bool:
+        """Atomically rename temp file to final path."""
+        try:
+            os.rename(temp_path, final_path)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to finalize {temp_path} -> {final_path}: {e}")
+            self.remove_file(temp_path)
+            return False
+
+    def remove_file(self, file_path: str) -> None:
+        """Best-effort remove of a file."""
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to remove {file_path}: {e}")
+
     def files_to_nixl_tuples(
         self, file_paths: List[str]
     ) -> List[Tuple[int, int, int, str]]:

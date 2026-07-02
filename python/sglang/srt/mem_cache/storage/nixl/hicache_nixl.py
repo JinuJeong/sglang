@@ -295,15 +295,23 @@ class HiCacheNixl(HiCacheStorage):
         suffixed_keys = [self._get_suffixed_key(key) for key in keys]
 
         if self.backend_selector.mem_type == "FILE":
-            file_paths = []
+            final_paths, temp_paths = [], []
             for key in suffixed_keys:
-                file_path = self.file_manager.get_file_path(key)
-                # New file per set, to be updated when partial writes is added to HiCache
-                if not self.file_manager.create_file(file_path):
-                    logger.error(f"Failed to create file {file_path}")
+                final_path = self.file_manager.get_file_path(key)
+                temp_path = self.file_manager.get_temp_file_path(final_path)
+                if not self.file_manager.create_temp_file(temp_path):
+                    logger.error(f"Failed to create temp file {temp_path}")
                     return False
-                file_paths.append(file_path)
-            return self._execute_transfer(values, file_paths, "WRITE")
+                final_paths.append(final_path)
+                temp_paths.append(temp_path)
+            success = self._execute_transfer(values, temp_paths, "WRITE")
+            if success:
+                for temp_path, final_path in zip(temp_paths, final_paths):
+                    self.file_manager.finalize_temp_file(temp_path, final_path)
+            else:
+                for temp_path in temp_paths:
+                    self.file_manager.remove_file(temp_path)
+            return success
         else:  # mem_type == "OBJ"
             return self._execute_transfer(values, suffixed_keys, "WRITE")
 
@@ -341,9 +349,8 @@ class HiCacheNixl(HiCacheStorage):
 
         if self.is_zero_copy:
             key_list = self._get_key_list_from_meta(keys)
-            key_denominator = (
-                1 if not self.is_mla_model else 2
-            )  # MLA model only has k buffer, no separate v buffer
+            # MLA model only has k buffer, no separate v buffer
+            key_denominator = 1 if self.is_mla_model else 2
         else:
             key_list = [self._get_suffixed_key(key) for key in keys]
             key_denominator = 1
@@ -580,17 +587,22 @@ class HiCacheNixl(HiCacheStorage):
             src = target_tensors
 
         if self.backend_selector.mem_type == "FILE":
-            file_paths = []
+            final_paths, temp_paths = [], []
             for key in key_strs:
-                file_path = self.file_manager.get_file_path(key)
-                # New file per set, to be updated when partial writes is added to HiCache
-                if not self.file_manager.create_file(file_path):
-                    logger.error(
-                        f"******** Failed to create file {file_path} *********"
-                    )
+                final_path = self.file_manager.get_file_path(key)
+                temp_path = self.file_manager.get_temp_file_path(final_path)
+                if not self.file_manager.create_temp_file(temp_path):
+                    logger.error(f"Failed to create temp file {temp_path}")
                     return [False] * len(keys)
-                file_paths.append(file_path)
-            success = self._execute_transfer(src, file_paths, "WRITE")
+                final_paths.append(final_path)
+                temp_paths.append(temp_path)
+            success = self._execute_transfer(src, temp_paths, "WRITE")
+            if success:
+                for temp_path, final_path in zip(temp_paths, final_paths):
+                    self.file_manager.finalize_temp_file(temp_path, final_path)
+            else:
+                for temp_path in temp_paths:
+                    self.file_manager.remove_file(temp_path)
         else:  # mem_type == "OBJ"
             success = self._execute_transfer(src, key_strs, "WRITE")
 
