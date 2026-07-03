@@ -980,6 +980,12 @@ class HiCacheController:
                 if operation is None:
                     continue
                 self._page_transfer(operation)
+                logger.debug(
+                    "prefetch_io: complete req=%s completed_tokens=%d/%d",
+                    operation.request_id,
+                    operation.completed_tokens,
+                    operation.host_indices.numel(),
+                )
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
                     operation.host_indices[operation.completed_tokens :]
@@ -1042,10 +1048,11 @@ class HiCacheController:
                 if operation is None:
                     continue
                 logger.debug(
-                    "prefetch_queue: drain req=%s ntokens=%d qdepth=%d",
+                    "prefetch_queue: drain req=%s ntokens=%d qdepth=%d t=%.6f",
                     operation.request_id,
                     len(operation.token_ids),
                     self.prefetch_queue.qsize(),
+                    time.monotonic(),
                 )
                 hash_value, storage_hit_count = self._storage_hit_query(operation)
                 storage_hit_count_tensor = torch.tensor(
@@ -1218,14 +1225,21 @@ class HiCacheController:
                 if operation is None:
                     continue
                 logger.debug(
-                    "backup_queue: drain op=%s ntokens=%d qdepth=%d",
+                    "backup_queue: drain op=%s ntokens=%d qdepth=%d t=%.6f",
                     operation.id,
                     len(operation.token_ids),
                     self.backup_queue.qsize(),
+                    time.monotonic(),
                 )
 
                 if not self.backup_skip:
                     self._page_backup(operation)
+                logger.debug(
+                    "backup: complete op=%s completed_tokens=%d/%d",
+                    operation.id,
+                    operation.completed_tokens,
+                    len(operation.token_ids),
+                )
                 self.ack_backup_queue.put(operation)
 
             except Empty:
