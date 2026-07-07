@@ -225,6 +225,7 @@ class HiCacheController:
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[dict] = None,
         enable_storage_metrics: bool = False,
+        storage_dispatcher: str = "none",
     ):
         self.tp_group = tp_group
         self.attn_cp_group = attn_cp_group
@@ -246,6 +247,7 @@ class HiCacheController:
         self.storage_backend = None
         self.storage_backend_type = None
         self.enable_storage_metrics = enable_storage_metrics
+        self.storage_dispatcher = storage_dispatcher
 
         # Draft KV pool support (best-effort piggyback on target L2/L3 ops).
         self.has_draft = False
@@ -352,18 +354,28 @@ class HiCacheController:
         self.prefetch_thread = threading.Thread(
             target=self.prefetch_thread_func, daemon=True
         )
-        self.backup_thread = threading.Thread(
-            target=self.backup_thread_func, daemon=True
-        )
+        if self.storage_dispatcher != "none":
+            self.transfer_queue: Queue[StorageOperation] = Queue()
+            self.transfer_dispatcher_thread = threading.Thread(
+                target=self.transfer_dispatcher_func, daemon=True
+            )
+        else:
+            self.backup_thread = threading.Thread(
+                target=self.backup_thread_func, daemon=True
+            )
+            self.backup_queue = Queue()
+
         self.prefetch_queue = Queue()
-        self.backup_queue = Queue()
 
         self.prefetch_revoke_queue: Queue[str] = Queue()
         self.ack_backup_queue: Queue[StorageOperation] = Queue()
         self.host_mem_release_queue: Queue[torch.Tensor] = Queue()
 
         self.prefetch_thread.start()
-        self.backup_thread.start()
+        if self.storage_dispatcher != "none":
+            self.transfer_dispatcher_thread.start()
+        else:
+            self.backup_thread.start()
 
     def _stop_storage_threads(self):
         """Stop storage prefetch/backup threads and drain internal queues.
@@ -381,10 +393,14 @@ class HiCacheController:
         try:
             if hasattr(self, "prefetch_queue"):
                 self.prefetch_queue.put_nowait(None)
-            if hasattr(self, "backup_queue"):
-                self.backup_queue.put_nowait(None)
-            if hasattr(self, "prefetch_buffer"):
-                self.prefetch_buffer.put_nowait(None)
+            if self.storage_dispatcher != "none":
+                if hasattr(self, "transfer_queue"):
+                    self.transfer_queue.put_nowait(None)
+            else:
+                if hasattr(self, "backup_queue"):
+                    self.backup_queue.put_nowait(None)
+                if hasattr(self, "prefetch_buffer"):
+                    self.prefetch_buffer.put_nowait(None)
         except Exception:
             pass
 
@@ -392,10 +408,14 @@ class HiCacheController:
         threads = []
         if hasattr(self, "prefetch_thread"):
             threads.append(self.prefetch_thread)
-        if hasattr(self, "backup_thread"):
-            threads.append(self.backup_thread)
-        if hasattr(self, "prefetch_io_aux_thread"):
-            threads.append(self.prefetch_io_aux_thread)
+        if self.storage_dispatcher != "none":
+            if hasattr(self, "transfer_dispatcher_thread"):
+                threads.append(self.transfer_dispatcher_thread)
+        else:
+            if hasattr(self, "backup_thread"):
+                threads.append(self.backup_thread)
+            if hasattr(self, "prefetch_io_aux_thread"):
+                threads.append(self.prefetch_io_aux_thread)
 
         for t in threads:
             try:
@@ -633,9 +653,14 @@ class HiCacheController:
         self.ack_load_queue.clear()
         if self.enable_storage:
             self.prefetch_thread.join()
-            self.backup_thread.join()
-            self.prefetch_queue.queue.clear()
-            self.backup_queue.queue.clear()
+            if self.storage_dispatcher != "none":
+                self.transfer_dispatcher_thread.join()
+                self.prefetch_queue.queue.clear()
+                self.transfer_queue.queue.clear()
+            else:
+                self.backup_thread.join()
+                self.prefetch_queue.queue.clear()
+                self.backup_queue.queue.clear()
             self.prefetch_revoke_queue.queue.clear()
             self.ack_backup_queue.queue.clear()
             self.host_mem_release_queue.queue.clear()
@@ -647,11 +672,19 @@ class HiCacheController:
             self.prefetch_thread = threading.Thread(
                 target=self.prefetch_thread_func, daemon=True
             )
-            self.backup_thread = threading.Thread(
-                target=self.backup_thread_func, daemon=True
-            )
+            if self.storage_dispatcher != "none":
+                self.transfer_dispatcher_thread = threading.Thread(
+                    target=self.transfer_dispatcher_func, daemon=True
+                )
+            else:
+                self.backup_thread = threading.Thread(
+                    target=self.backup_thread_func, daemon=True
+                )
             self.prefetch_thread.start()
-            self.backup_thread.start()
+            if self.storage_dispatcher != "none":
+                self.transfer_dispatcher_thread.start()
+            else:
+                self.backup_thread.start()
 
     def write(
         self,
@@ -979,6 +1012,13 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                logger.debug(
+                    "prefetch_buffer: drain req=%s ntokens=%d qdepth=%d t=%.6f",
+                    operation.request_id,
+                    len(operation.token_ids),
+                    self.prefetch_buffer.qsize(),
+                    time.monotonic(),
+                )
                 self._page_transfer(operation)
                 logger.debug(
                     "prefetch_io: complete req=%s completed_tokens=%d/%d",
@@ -1037,23 +1077,17 @@ class HiCacheController:
         """
         Manage prefetching operations from storage backend to host memory.
         """
-        self.prefetch_buffer = Queue()
-        self.prefetch_io_aux_thread = threading.Thread(
-            target=self.prefetch_io_aux_func, daemon=True
-        )
-        self.prefetch_io_aux_thread.start()
+        if self.storage_dispatcher == "none":
+            self.prefetch_buffer = Queue()
+            self.prefetch_io_aux_thread = threading.Thread(
+                target=self.prefetch_io_aux_func, daemon=True
+            )
+            self.prefetch_io_aux_thread.start()
         while (not self.storage_stop_event.is_set()) or not self.prefetch_queue.empty():
             try:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
-                logger.debug(
-                    "prefetch_queue: drain req=%s ntokens=%d qdepth=%d t=%.6f",
-                    operation.request_id,
-                    len(operation.token_ids),
-                    self.prefetch_queue.qsize(),
-                    time.monotonic(),
-                )
                 hash_value, storage_hit_count = self._storage_hit_query(operation)
                 storage_hit_count_tensor = torch.tensor(
                     storage_hit_count, dtype=torch.int
@@ -1082,7 +1116,10 @@ class HiCacheController:
                     logger.debug(
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
                     )
-                    self.prefetch_buffer.put(operation)
+                    if self.storage_dispatcher != "none":
+                        self.transfer_queue.put(operation)
+                    else:
+                        self.prefetch_buffer.put(operation)
 
             except Empty:
                 continue
@@ -1100,13 +1137,22 @@ class HiCacheController:
         operation = StorageOperation(
             host_indices, token_ids, hash_value=hash_value, prefix_keys=prefix_keys
         )
-        self.backup_queue.put(operation)
-        logger.debug(
-            "backup_queue: submit op=%s ntokens=%d qdepth=%d",
-            operation.id,
-            len(token_ids),
-            self.backup_queue.qsize(),
-        )
+        if self.storage_dispatcher != "none":
+            self.transfer_queue.put(operation)
+            logger.debug(
+                "transfer_queue: submit op=%s ntokens=%d qdepth=%d",
+                operation.id,
+                len(token_ids),
+                self.transfer_queue.qsize(),
+            )
+        else:
+            self.backup_queue.put(operation)
+            logger.debug(
+                "backup_queue: submit op=%s ntokens=%d qdepth=%d",
+                operation.id,
+                len(token_ids),
+                self.backup_queue.qsize(),
+            )
         return operation.id
 
     # todo: deprecate
@@ -1242,5 +1288,57 @@ class HiCacheController:
                 )
                 self.ack_backup_queue.put(operation)
 
+            except Empty:
+                continue
+
+    def transfer_dispatcher_func(self):
+        """
+        Unified FIFO dispatcher for storage transfers.
+
+        Services both prefetch (READ) and backup (WRITE) operations from a
+        single queue, one at a time, to avoid concurrent access to non-
+        thread-safe storage backends. Strict FIFO ordering.
+        """
+        while (not self.storage_stop_event.is_set()) or not self.transfer_queue.empty():
+            try:
+                operation = self.transfer_queue.get(block=True, timeout=1)
+                if operation is None:
+                    continue
+                if isinstance(operation, PrefetchOperation):
+                    logger.debug(
+                        "prefetch: drain req=%s ntokens=%d qdepth=%d t=%.6f",
+                        operation.request_id,
+                        len(operation.token_ids),
+                        self.transfer_queue.qsize(),
+                        time.monotonic(),
+                    )
+                    self._page_transfer(operation)
+                    logger.debug(
+                        "prefetch: complete req=%s completed_tokens=%d/%d",
+                        operation.request_id,
+                        operation.completed_tokens,
+                        operation.host_indices.numel(),
+                    )
+                    # release pre-allocated memory for un-transferred pages
+                    self.append_host_mem_release(
+                        operation.host_indices[operation.completed_tokens :]
+                    )
+                else:  # backup StorageOperation
+                    logger.debug(
+                        "backup: drain op=%s ntokens=%d qdepth=%d t=%.6f",
+                        operation.id,
+                        len(operation.token_ids),
+                        self.transfer_queue.qsize(),
+                        time.monotonic(),
+                    )
+                    if not self.backup_skip:
+                        self._page_backup(operation)
+                    logger.debug(
+                        "backup: complete op=%s completed_tokens=%d/%d",
+                        operation.id,
+                        operation.completed_tokens,
+                        len(operation.token_ids),
+                    )
+                    self.ack_backup_queue.put(operation)
             except Empty:
                 continue

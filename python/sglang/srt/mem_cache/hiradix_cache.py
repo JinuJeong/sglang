@@ -154,6 +154,7 @@ class HiRadixCache(RadixCache):
                 model_name=server_args.served_model_name,
                 storage_backend_extra_config=extra_config,
                 enable_storage_metrics=self.enable_storage_metrics,
+                storage_dispatcher=server_args.hicache_storage_dispatcher,
             )
         self._apply_storage_runtime_config(
             storage_backend=server_args.hicache_storage_backend,
@@ -1495,7 +1496,8 @@ class HiRadixCache(RadixCache):
         if prefetch_length < self.prefetch_threshold:
             logger.debug(
                 f"prefetch_from_storage skipped: length {prefetch_length} < "
-                f"threshold {self.prefetch_threshold}, req_id={req_id}")
+                f"threshold {self.prefetch_threshold}, req_id={req_id}"
+            )
             return
         if self.cache_controller.prefetch_rate_limited():
             logger.debug(

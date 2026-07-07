@@ -1835,6 +1835,13 @@ class ServerArgs:
         Optional[str],
         "A dictionary in JSON string format, or a string starting with a leading '@' and a config file in JSON/YAML/TOML format, containing extra configuration for the storage backend.",
     ] = None
+    hicache_storage_dispatcher: A[
+        str,
+        Arg(
+            help="Storage transfer dispatch strategy.",
+            choices=["none", "fifo"],
+        ),
+    ] = "none"
 
     # -------------------------------------------------------------------------
     # Hierarchical sparse attention
