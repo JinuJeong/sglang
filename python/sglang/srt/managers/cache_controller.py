@@ -169,6 +169,7 @@ class StorageOperation:
 
         self.id = StorageOperation.counter
         StorageOperation.counter += 1
+        self.submit_time: float = 0.0
 
     def __lt__(self, other: StorageOperation):
         return self.id < other.id
@@ -248,6 +249,8 @@ class HiCacheController:
         self.storage_backend_type = None
         self.enable_storage_metrics = enable_storage_metrics
         self.storage_dispatcher = storage_dispatcher
+        self._pending_reads: int = 0
+        self._pending_writes: int = 0
 
         # Draft KV pool support (best-effort piggyback on target L2/L3 ops).
         self.has_draft = False
@@ -664,6 +667,8 @@ class HiCacheController:
             self.prefetch_revoke_queue.queue.clear()
             self.ack_backup_queue.queue.clear()
             self.host_mem_release_queue.queue.clear()
+            self._pending_reads = 0
+            self._pending_writes = 0
             self.prefetch_tokens_occupied = 0
 
         self.storage_stop_event.clear()
@@ -1117,9 +1122,25 @@ class HiCacheController:
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
                     )
                     if self.storage_dispatcher != "none":
+                        operation.submit_time = time.monotonic()
+                        self._pending_reads += 1
                         self.transfer_queue.put(operation)
+                        logger.debug(
+                            "prefetch: submit req=%s ntokens=%d qdepth=%d (%d reads, %d writes)",
+                            operation.request_id,
+                            len(operation.token_ids),
+                            self.transfer_queue.qsize(),
+                            self._pending_reads,
+                            self._pending_writes,
+                        )
                     else:
                         self.prefetch_buffer.put(operation)
+                        logger.debug(
+                            "prefetch_buffer: submit req=%s ntokens=%d qdepth=%d",
+                            operation.request_id,
+                            len(operation.token_ids),
+                            self.prefetch_buffer.qsize(),
+                        )
 
             except Empty:
                 continue
@@ -1138,12 +1159,16 @@ class HiCacheController:
             host_indices, token_ids, hash_value=hash_value, prefix_keys=prefix_keys
         )
         if self.storage_dispatcher != "none":
+            operation.submit_time = time.monotonic()
+            self._pending_writes += 1
             self.transfer_queue.put(operation)
             logger.debug(
-                "transfer_queue: submit op=%s ntokens=%d qdepth=%d",
+                "backup: submit op=%s ntokens=%d qdepth=%d (%d reads, %d writes)",
                 operation.id,
                 len(token_ids),
                 self.transfer_queue.qsize(),
+                self._pending_reads,
+                self._pending_writes,
             )
         else:
             self.backup_queue.put(operation)
@@ -1305,12 +1330,17 @@ class HiCacheController:
                 if operation is None:
                     continue
                 if isinstance(operation, PrefetchOperation):
+                    self._pending_reads -= 1
+                    now = time.monotonic()
                     logger.debug(
-                        "prefetch: drain req=%s ntokens=%d qdepth=%d t=%.6f",
+                        "prefetch: drain req=%s ntokens=%d qdepth=%d (%d reads, %d writes) delay=%.3fs t=%.6f",
                         operation.request_id,
                         len(operation.token_ids),
                         self.transfer_queue.qsize(),
-                        time.monotonic(),
+                        self._pending_reads,
+                        self._pending_writes,
+                        now - operation.submit_time,
+                        now,
                     )
                     self._page_transfer(operation)
                     logger.debug(
@@ -1324,12 +1354,17 @@ class HiCacheController:
                         operation.host_indices[operation.completed_tokens :]
                     )
                 else:  # backup StorageOperation
+                    self._pending_writes -= 1
+                    now = time.monotonic()
                     logger.debug(
-                        "backup: drain op=%s ntokens=%d qdepth=%d t=%.6f",
+                        "backup: drain op=%s ntokens=%d qdepth=%d (%d reads, %d writes) delay=%.3fs t=%.6f",
                         operation.id,
                         len(operation.token_ids),
                         self.transfer_queue.qsize(),
-                        time.monotonic(),
+                        self._pending_reads,
+                        self._pending_writes,
+                        now - operation.submit_time,
+                        now,
                     )
                     if not self.backup_skip:
                         self._page_backup(operation)
