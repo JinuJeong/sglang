@@ -53,11 +53,18 @@ logger = logging.getLogger(__name__)
 device_module = get_device_module()
 
 
+def _new_timing_event():
+    try:
+        return device_module.Event(enable_timing=True)
+    except TypeError:
+        return device_module.Event()
+
+
 class LayerLoadingEvent:
     def __init__(self, num_layers: int):
         self._num_layers = num_layers
-        self.load_events = [device_module.Event() for _ in range(num_layers)]
-        self.start_event = device_module.Event()  # start event on controller stream
+        self.load_events = [_new_timing_event() for _ in range(num_layers)]
+        self.start_event = _new_timing_event()  # start event on controller stream
 
     def complete(self, layer_index: int):
         assert 0 <= layer_index < self._num_layers
@@ -727,12 +734,14 @@ class HiCacheController:
             )
         self.write_queue.clear()
 
-        start_event = device_module.Event()
-        finish_event = device_module.Event()
+        start_event = _new_timing_event()
+        finish_event = _new_timing_event()
+        sync_event = _new_timing_event()
 
-        start_event.record()
+        sync_event.record()
         with device_module.stream(self.write_stream):
-            start_event.wait(self.write_stream)
+            sync_event.wait(self.write_stream)
+            start_event.record()
             self.mem_pool_host.backup_from_device_all_layer(
                 self.mem_pool_device, host_indices, device_indices, self.io_backend
             )
@@ -804,10 +813,12 @@ class HiCacheController:
         )
         self.load_queue.clear()
         producer_event = self.layer_done_counter.events[producer_id]
-        producer_event.start_event.record()
+        sync_event = _new_timing_event()
+        sync_event.record()
 
         with device_module.stream(self.load_stream):
-            producer_event.start_event.wait(self.load_stream)
+            sync_event.wait(self.load_stream)
+            producer_event.start_event.record()
             for i in range(self.layer_num):
                 self.mem_pool_host.load_to_device_per_layer(
                     self.mem_pool_device,

@@ -905,14 +905,50 @@ class HiRadixCache(RadixCache):
                 # write to host if the node is not backuped
                 self.write_backup(node)
 
+    def _log_hicache_bandwidth(
+        self, start_event, finish_event, num_tokens: int, direction: str
+    ) -> None:
+        if start_event is None or num_tokens <= 0:
+            return
+        try:
+            elapsed_ms = start_event.elapsed_time(finish_event)
+        except Exception:
+            return
+        if elapsed_ms <= 0:
+            return
+        mem_pool_host = self.cache_controller.mem_pool_host
+        size_per_token = getattr(mem_pool_host, "size_per_token", None)
+        if size_per_token is None:
+            size_per_token = mem_pool_host.get_size_per_token()
+        total_bytes = num_tokens * size_per_token
+        total_mb = total_bytes / (1 << 20)
+        gbps = total_bytes / (elapsed_ms / 1000) / (1 << 30)
+        logger.debug(
+            f"HiCache {direction} transferred: {num_tokens} tokens, "
+            f"{total_mb:.2f} MB, "
+            f"total time: {elapsed_ms:.3f} ms, effective bandwidth: {gbps:.2f} GB/s"
+        )
+
     def writing_check(self, write_back=False):
         if write_back:
             # blocking till all write back complete
             while len(self.ongoing_write_through) > 0:
-                for _, finish_event, ack_list in self.cache_controller.ack_write_queue:
+                for (
+                    start_event,
+                    finish_event,
+                    ack_list,
+                ) in self.cache_controller.ack_write_queue:
                     finish_event.synchronize()
+                    total_tokens = sum(
+                        self.ongoing_write_through[aid][1]
+                        for aid in ack_list
+                        if aid in self.ongoing_write_through
+                    )
                     for ack_id in ack_list:
                         self._finish_write_through_ack(ack_id, release_lock=False)
+                    self._log_hicache_bandwidth(
+                        start_event, finish_event, total_tokens, "D2H"
+                    )
                 self.cache_controller.ack_write_queue.clear()
                 assert len(self.ongoing_write_through) == 0
             return
@@ -934,10 +970,18 @@ class HiRadixCache(RadixCache):
         if finish_count > 0:
             logger.debug(f"Process {finish_count} write back operations")
         while finish_count > 0:
-            _, finish_event, ack_list = self.cache_controller.ack_write_queue.pop(0)
+            start_event, finish_event, ack_list = (
+                self.cache_controller.ack_write_queue.pop(0)
+            )
             finish_event.synchronize()
+            total_tokens = sum(
+                self.ongoing_write_through[aid][1]
+                for aid in ack_list
+                if aid in self.ongoing_write_through
+            )
             for ack_id in ack_list:
                 self._finish_write_through_ack(ack_id, release_lock=True)
+            self._log_hicache_bandwidth(start_event, finish_event, total_tokens, "D2H")
             finish_count -= 1
 
     def loading_check(self):
@@ -954,11 +998,14 @@ class HiRadixCache(RadixCache):
         if finish_count > 0:
             logger.debug(f"Process {finish_count} load operations")
         while finish_count > 0:
-            _, finish_event, ack_list = self.cache_controller.ack_load_queue.pop(0)
+            start_event, finish_event, ack_list = (
+                self.cache_controller.ack_load_queue.pop(0)
+            )
             finish_event.synchronize()
             for ack_id in ack_list:
-                end_node = self.ongoing_load_back.pop(ack_id)
+                end_node, num_tokens = self.ongoing_load_back.pop(ack_id)
                 self.dec_lock_ref(end_node)
+            self._log_hicache_bandwidth(start_event, finish_event, num_tokens, "H2D")
             finish_count -= 1
 
     def is_load_back_event_done(self, consumer_index: int) -> bool:
@@ -1192,7 +1239,7 @@ class HiRadixCache(RadixCache):
             )
             return None
 
-        self.ongoing_load_back[last_hit_node.id] = last_hit_node
+        self.ongoing_load_back[last_hit_node.id] = (last_hit_node, len(host_indices))
         offset = 0
         for node in nodes_to_load:
             node.value = device_indices[offset : offset + len(node.host_value)].clone()
