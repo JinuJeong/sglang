@@ -179,7 +179,10 @@ class HiRadixCache(RadixCache):
         self.work_list: List[torch.distributed.Work] = []
         # todo: dynamically adjust the threshold
         self.write_through_threshold = (
-            1 if server_args.hicache_write_policy == "write_through" else 2
+            1
+            if server_args.hicache_write_policy
+            in ("write_through", "write_through_prompt_only")
+            else 2
         )
         self.load_back_threshold = 10
 
@@ -385,7 +388,10 @@ class HiRadixCache(RadixCache):
                 if hicache_write_policy is not None:
                     self.cache_controller.write_policy = hicache_write_policy
                     self.write_through_threshold = (
-                        1 if hicache_write_policy == "write_through" else 2
+                        1
+                        if hicache_write_policy
+                        in ("write_through", "write_through_prompt_only")
+                        else 2
                     )
                     logger.info(f"Set hicache_write_policy to {hicache_write_policy}")
                 return (
@@ -409,7 +415,10 @@ class HiRadixCache(RadixCache):
         if hicache_write_policy is not None:
             self.cache_controller.write_policy = hicache_write_policy
             self.write_through_threshold = (
-                1 if hicache_write_policy == "write_through" else 2
+                1
+                if hicache_write_policy
+                in ("write_through", "write_through_prompt_only")
+                else 2
             )
             logger.info(f"Set hicache_write_policy to {hicache_write_policy}")
 
@@ -1772,7 +1781,10 @@ class HiRadixCache(RadixCache):
             # Emit BlockStored so the router indexes this block.
             self._record_store_event(new_node)
 
-            if self.cache_controller.write_policy != "write_back":
+            if self.cache_controller.write_policy != "write_back" and not (
+                self.cache_controller.write_policy == "write_through_prompt_only"
+                and params.is_finished
+            ):
                 self._inc_hit_count(new_node, chunked)
         return InsertResult(prefix_len=total_prefix_length)
 

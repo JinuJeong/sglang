@@ -282,6 +282,7 @@ class HiCacheController:
             "write_through",
             "write_through_selective",
             "write_back",
+            "write_through_prompt_only",
         ]:
             raise ValueError(f"Invalid write policy: {write_policy}")
 

@@ -1378,7 +1378,12 @@ class AttachHiCacheStorageReqInput(BaseReq):
 
         if self.hicache_write_policy is None:
             return
-        allowed = ["write_back", "write_through", "write_through_selective"]
+        allowed = [
+            "write_back",
+            "write_through",
+            "write_through_selective",
+            "write_through_prompt_only",
+        ]
         if self.hicache_write_policy not in allowed:
             raise ValueError(
                 f"Invalid hicache_write_policy: {self.hicache_write_policy!r}. "

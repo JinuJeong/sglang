@@ -1785,7 +1785,12 @@ class ServerArgs:
         str,
         Arg(
             help="The write policy of hierarchical cache.",
-            choices=["write_back", "write_through", "write_through_selective"],
+            choices=[
+                "write_back",
+                "write_through",
+                "write_through_selective",
+                "write_through_prompt_only",
+            ],
         ),
     ] = "write_through"
     hicache_io_backend: A[
