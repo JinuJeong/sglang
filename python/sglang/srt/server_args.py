@@ -1847,6 +1847,14 @@ class ServerArgs:
             choices=["none", "fifo"],
         ),
     ] = "none"
+    hicache_preserve_hit_count: A[
+        bool,
+        Arg(
+            help="Keep evicted unbacked nodes in the radix tree as tombstones to preserve hit_count. "
+            "Enables write_through_selective to accumulate hits across eviction cycles. "
+            "Only effective with write_through_selective policy.",
+        ),
+    ] = False
 
     # -------------------------------------------------------------------------
     # Hierarchical sparse attention

@@ -185,6 +185,7 @@ class HiRadixCache(RadixCache):
             else 2
         )
         self.load_back_threshold = 10
+        self.preserve_hit_count = server_args.hicache_preserve_hit_count
 
         # Detach storage backend automatically on process shutdown
         atexit.register(self.shutdown)
@@ -1084,7 +1085,7 @@ class HiRadixCache(RadixCache):
                     self.evictable_host_leaves.remove(node)
                 return
 
-        if node not in self.evictable_host_leaves:
+        if node.backuped and node not in self.evictable_host_leaves:
             self.evictable_host_leaves.add(node)
 
     def evict(self, params: EvictParams) -> EvictResult:
@@ -1152,12 +1153,22 @@ class HiRadixCache(RadixCache):
 
     def _evict_regular(self, node: TreeNode):
         # evict a node not initiated write to host -- emit BlockRemoved
-        assert len(node.children) == 0, f"non-leaf, {node.id=}"
-
         self._record_remove_event(node)
         self.cache_controller.mem_pool_device_allocator.free(node.value)
         num_evicted = len(node.value)
-        self._delete_leaf(node)
+
+        if self.preserve_hit_count:
+            # Tombstone: keep the node to preserve hit_count across eviction.
+            # The node stays in the tree with value=None (evicted=True).
+            # When the same prefix returns, insert's evicted-branch restores
+            # the value and _inc_hit_count accumulates toward the threshold.
+            self.evictable_size_ -= num_evicted
+            node.value = None
+            self._update_leaf_status(node)
+            self._update_leaf_status(node.parent)
+        else:
+            assert len(node.children) == 0, f"non-leaf, {node.id=}"
+            self._delete_leaf(node)
         return num_evicted
 
     def evict_host(self, num_tokens: int):
@@ -1517,7 +1528,8 @@ class HiRadixCache(RadixCache):
         host_hit_length = 0
         last_host_node = last_node
         while last_node.evicted:
-            host_hit_length += len(last_node.host_value)
+            if last_node.backuped:
+                host_hit_length += len(last_node.host_value)
             last_node = last_node.parent
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
@@ -1739,6 +1751,7 @@ class HiRadixCache(RadixCache):
                     self._update_host_leaf_status(node)
                     # update parent status as a new leaf is added into device
                     self._update_leaf_status(node.parent)
+                    self._inc_hit_count(node, chunked)
                 else:
                     if not is_finished:
                         self._inc_hit_count(node, chunked)
@@ -1755,6 +1768,7 @@ class HiRadixCache(RadixCache):
                     self._update_host_leaf_status(new_node)
                     # update parent status as a new leaf is added into device
                     self._update_leaf_status(new_node.parent)
+                    self._inc_hit_count(new_node, chunked)
                 else:
                     if not is_finished:
                         self._inc_hit_count(new_node, chunked)
